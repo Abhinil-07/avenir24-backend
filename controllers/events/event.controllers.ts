@@ -1,11 +1,16 @@
 import { Request, Response } from "express";
 
 import EventModel from "../../models/event.model";
+import { Redis } from "ioredis";
 
-const uploadOnCloudinary = require("../../utils/cloudinary");
 const nodemailer = require("nodemailer");
 
 const mailTemplate = require("../../template/mailTemplate");
+
+const redis = new Redis();
+redis.on("connect", () => {
+  console.log("Redis connected");
+});
 
 interface MulterRequest extends Request {
   files: any;
@@ -45,8 +50,34 @@ const addEvents = async (req: MulterRequest, res: Response) => {
 
 const getEvents = async (req: Request, res: Response) => {
   try {
-    const subCategory = req.params.subCategory;
+    const subCategory = req.params.subCategory as string | undefined;
+
+    if (!subCategory) {
+      return res.status(400).json({
+        message: "Subcategory parameter is required",
+      });
+    }
+
+    const isExists = await redis.exists(subCategory);
+
+    if (isExists) {
+      console.log("Fetching from cache");
+      const events = await redis.get(subCategory);
+
+      if (!events) {
+        return res.status(404).json({
+          message: "Events not found in cache",
+        });
+      }
+
+      return res.status(200).json({
+        message: "Events fetched successfully",
+        events: JSON.parse(events),
+      });
+    }
+
     const events = await EventModel.find({ subCategory });
+    await redis.setex(subCategory, 3600, JSON.stringify(events));
     return res.status(200).json({
       message: "Events fetched successfully",
       events,
@@ -63,8 +94,24 @@ const getIndividualEvent = async (req: Request, res: Response) => {
   try {
     const _id = req.params.eventId;
     console.log(_id);
+    const isExists = await redis.exists(_id);
+
+    if (isExists) {
+      console.log("Fetching from cache");
+      const event = await redis.get(_id);
+      if (!event) {
+        return res.status(404).json({
+          message: "Event not found in cache",
+        });
+      }
+      return res.status(200).json({
+        message: "Event fetched successfully",
+        event: JSON.parse(event),
+      });
+    }
     const event = await EventModel.findOne({ _id });
-    console.log(event);
+    await redis.setex(_id, 3600, JSON.stringify(event));
+
     if (!event) {
       return res.status(404).json({
         message: "Event not found",
@@ -102,7 +149,8 @@ const deleteEvent = async (req: Request, res: Response) => {
   try {
     const _id = req.params.eventId;
     const event = await EventModel.findOneAndDelete({ _id });
-
+    await redis.del(_id);
+    //get the subcategory of the event and invalidate the cache of that subcategory after deletion
     if (!event) {
       return res.status(404).json({
         message: "Event not found",
